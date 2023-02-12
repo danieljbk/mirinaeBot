@@ -4,20 +4,29 @@ const express = require('express')
 const app = express()
 const port = process.env.PORT || 8080
 
-const scrapeMirinae = require('./mirinae.js')
-const { twitterClient, twitterBearer } = require('./twitterClient.js')
+const scrapeMirinae = require('./mirinaeScraper.js')
+const {
+  mirinaeTwitterClient,
+  mirinaeTwitterBearer,
+} = require('./mirinaeTwitterClient.js')
+const {
+  emilyTwitterClient,
+  emilyTwitterBearer,
+} = require('./emilyTwitterClient.js')
 const { ETwitterStreamEvent } = require('twitter-api-v2')
-const extract_sentences = require('sentence-extractor').extract
+const tokenizer = require('sbd')
 
 app.listen(port, async () => {
   console.log('Server running on port ' + port)
 
+  const mirinaeTwitterAccountData = await mirinaeTwitterClient.v2.me()
+
   // *CURRENT STREAM RULES:
-  const rules = await twitterBearer.v2.streamRules()
+  const rules = await mirinaeTwitterBearer.v2.streamRules()
   console.log(rules)
 
   // *STREAM:
-  const stream = await twitterBearer.v2.searchStream({
+  const stream = await mirinaeTwitterBearer.v2.searchStream({
     expansions: ['referenced_tweets.id'],
   })
 
@@ -40,47 +49,64 @@ app.listen(port, async () => {
   )
 
   stream.on(ETwitterStreamEvent.Data, async (eventData) => {
-    const tweetData = eventData
     const mentionedTweetId = eventData.data.id
-    const referencedTweet = tweetData.includes.tweets.pop()
+    const referencedTweet = eventData.includes.tweets.pop()
     let referencedTweetTextContent = referencedTweet.text
 
-    // if the referenced tweetData is mentioning anyone, remove it from the text before analyzing.
-    referencedTweetTextContent.split(' ').forEach((word) => {
-      if (word.startsWith('@')) {
-        const index = referencedTweetTextContent.indexOf(word)
-        referencedTweetTextContent = referencedTweetTextContent.split(' ')
-        referencedTweetTextContent.splice(index, 1)
-        referencedTweetTextContent = referencedTweetTextContent.join(' ')
-      }
-    })
+    console.log('Received: ' + referencedTweetTextContent)
+
+    // remove unprocessable words from the tweet before processing.
+    referencedTweetTextContent = referencedTweetTextContent
+      .split(' ')
+      .filter(
+        (word) =>
+          !(
+            word.startsWith('@') ||
+            word.startsWith('#') ||
+            word.startsWith('http') ||
+            word.startsWith('www')
+          )
+      )
+    referencedTweetTextContent = referencedTweetTextContent.join(' ')
     referencedTweetTextContent = referencedTweetTextContent.trim()
 
-    let sentences = extract_sentences(referencedTweetTextContent)
-
-    // remove whitespace from sentences
+    // remove whitespace & empty strings from sentences
+    let sentences = tokenizer.sentences(referencedTweetTextContent, {})
     sentences = sentences.map((sentence) => sentence.trim())
-
-    // remove empty strings
     sentences = sentences.filter((sentence) => sentence !== '')
 
+    console.log(sentences)
+
+    console.log('Generating images...')
     const media_ids = []
     for (let sentence of sentences) {
-      const imageBuffer = await scrapeMirinae(sentence)
-      media_ids.push(
-        await twitterClient.v1.uploadMedia(imageBuffer, {
-          type: 'png',
+      try {
+        const imageBuffer = await scrapeMirinae(sentence)
+        const media_id = await emilyTwitterClient.v1.uploadMedia(imageBuffer, {
+          mimeType: 'png',
+          additionalOwners: [mirinaeTwitterAccountData.data.id],
         })
-      )
+        media_ids.push(media_id)
+      } catch (err) {
+        console.log(err)
+      }
     }
 
-    await twitterClient.v1.reply(
-      'Analyzed + ' + referencedTweetTextContent,
-      mentionedTweetId,
-      {
-        media_ids,
-      }
-    )
+    console.log('Replying...')
+    try {
+      await mirinaeTwitterClient.v2.reply(
+        "Here's your explanation. You can learn more Korean on mirinae.io!",
+        mentionedTweetId,
+        {
+          media: { media_ids },
+        }
+      )
+    } catch (err) {
+      console.log(err)
+    }
+
+    console.log('Done!')
+    console.log()
   })
 
   // Enable reconnect feature
